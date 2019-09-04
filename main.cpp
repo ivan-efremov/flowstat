@@ -15,6 +15,8 @@
 #include <climits>
 #include <cassert>
 #include <functional>
+#include <vector>
+#include <memory>
 #include <bcc/BPF.h>
 #include "ebpf_flow.h"
 
@@ -22,17 +24,33 @@
 
 
 typedef std::function<bool(eBPFevent* event)> FilterType;
+typedef std::vector<FilterType>               VectorFilters;
+typedef std::shared_ptr<VectorFilters>        PVectorFilters;
+
+struct Statistic {
+    time_t   lastTime = 0;   ///< время обновления статистики
+    uint64_t packets  = 0;   ///< общее количество принятых пакетов
+    uint64_t bytes    = 0;   ///< общее количество принятых байт
+    double   avrSpeed = 0.0; ///< средняя скорость от начала работы утилиты (в Мбит/с)
+    double   minSpeed = 0.0; ///< минимальное значение скорости за 1-секундный интервал (в Мбит/с)
+    double   maxSpeed = 0.0; ///< максимальное значение скорости за 1-секундный интервал (в Мбит/с)
+};
+typedef std::shared_ptr<Statistic>         PStatistic;
+typedef std::vector<PStatistic>            VectorStatistics;
+typedef std::shared_ptr<VectorStatistics>  PVectorStatistics;
 
 
-static int                     s_isRun = true;
-static void                   *s_ebpf = NULL;
-static short                   s_flags = 0;
-static uint64_t                s_srcaddr = 0;
-static uint64_t                s_dstaddr = 0;
-static uint16_t                s_srcport = 0;
-static uint16_t                s_dstport = 0;
-static std::string             s_interface;
-static std::vector<FilterType> s_filters;
+static int               s_isRun = true;
+static void             *s_ebpf = NULL;
+static short             s_flags = 0;
+static uint64_t          s_srcaddr = 0;
+static uint64_t          s_dstaddr = 0;
+static uint16_t          s_srcport = 0;
+static uint16_t          s_dstport = 0;
+static uint64_t          s_flushStat = 0;
+static std::string       s_interface;
+static PVectorFilters    s_filters = std::make_shared<VectorFilters>();
+static PVectorStatistics s_statistics = std::make_shared<VectorStatistics>();
 
 
 static void ebpfHandler(void* t_bpfctx, void* t_data, int t_datasize);
@@ -80,11 +98,12 @@ static void init(int argc, const char *argv[])
             ("dstaddr,d",  po::value<std::string>(), "Destination address: xxx.xxx.xxx.xxx")
             ("srcport,k",  po::value<uint16_t>(),    "Source port: [1 - 65535]")
             ("dstport,o",  po::value<uint16_t>(),    "Destination port: [1 - 65535]")
-            ("proto,p",    po::value<std::string>(), "Protocols: tcp/udp/all");
+            ("proto,p",    po::value<std::string>(), "Protocols: tcp/udp/all")
+            ("flush,f",    po::value<uint64_t>(),    "Flush statistics: in milliseconds");
         po::store(po::parse_command_line(argc, argv, desc), vm);
         po::notify(vm);
-    } catch(const std::exception&) {
-         throw;
+    } catch(const std::exception& err) {
+         throw std::runtime_error(SOURCE_FILE_LINE + err.what());
     }
     if(vm.count("help") || argc == 1 ) {
         std::cout << desc
@@ -93,38 +112,42 @@ static void init(int argc, const char *argv[])
         exit(0);
     }
     if(vm.count("version")) {
-        std::cout << "0.0.1-" << __DATE__ << std::endl;
+        std::cout << "0.0.2-" << __DATE__ << std::endl;
         exit(0);
     }
     if(vm.count("interface")) {
         s_interface = vm["interface"].as<std::string>();
-        s_filters.emplace_back([](eBPFevent* event) {
+        s_filters->emplace_back([](eBPFevent* event) {
             return s_interface == event->ifname ? true : false;
         });
     }
     if(vm.count("srcaddr")) {
-        const std::string srcaddr = vm["srcaddr"].as<std::string>();
-        s_srcaddr = str2ip(srcaddr);
-        s_filters.emplace_back([](eBPFevent* event) {
+        auto statistic = std::make_shared<Statistic>();
+        s_statistics->push_back(statistic);
+        s_srcaddr = str2ip(vm["srcaddr"].as<std::string>());
+        s_filters->emplace_back([statistic](eBPFevent* event) {
+
             return event->addr.v4.saddr == s_srcaddr ? true : false;
         });
     }
     if(vm.count("dstaddr")) {
-        const std::string dstaddr = vm["dstaddr"].as<std::string>();
-        s_dstaddr = str2ip(dstaddr);
-        s_filters.emplace_back([](eBPFevent* event) {
+        auto statistic = std::make_shared<Statistic>();
+        s_statistics->push_back(statistic);
+        s_dstaddr = str2ip(vm["dstaddr"].as<std::string>());
+        s_filters->emplace_back([statistic](eBPFevent* event) {
+
             return event->addr.v4.daddr == s_dstaddr ? true : false;
         });
     }
     if(vm.count("srcport")) {
         s_srcport = vm["srcport"].as<uint16_t>();
-        s_filters.emplace_back([](eBPFevent* event) {
+        s_filters->emplace_back([](eBPFevent* event) {
             return event->sport == s_srcport ? true : false;
         });
     }
     if(vm.count("dstport")) {
         s_dstport = vm["dstport"].as<uint16_t>();
-        s_filters.emplace_back([](eBPFevent* event) {
+        s_filters->emplace_back([](eBPFevent* event) {
             return event->dport == s_dstport ? true : false;
         });
     }
@@ -140,6 +163,10 @@ static void init(int argc, const char *argv[])
             throw std::runtime_error("Invalid argument 'proto'");
         }
     }
+    if(vm.count("flush")) {
+       s_flushStat = vm["flush"].as<uint64_t>();
+       //....
+    }
     if(getuid() != 0) {
         throw std::runtime_error("Please run as root user");
     }
@@ -150,8 +177,9 @@ static void init(int argc, const char *argv[])
                 std::string("Unable to initialize libebpfflow: ") + ebpf_print_error(rc)
             );
     }
-    signal(SIGINT, terminate);
+    signal(SIGINT,  terminate);
     signal(SIGTERM, terminate);
+    signal(SIGQUIT, terminate);
 }
 
 static void run()
@@ -212,24 +240,6 @@ std::string event2String(eBPFevent* e)
     return std::to_string(e->etype);
 }
 
-static void IPV4Handler(void* t_bpfctx, eBPFevent *e, struct ipv4_addr_t *event)
-{
-    std::cout << "[" << event2String(e) << "] "
-              << e->ifname << " "
-              << (int)e->proto << " "
-              << e->proc.task << " "
-              << "["
-              << ip2str(event->saddr)
-              << ":"
-              << e->sport
-              << " <-> "
-              << ip2str(event->daddr)
-              << ":"
-              << e->dport
-              << "]"
-              << std::endl;
-}
-
 static void ebpfHandler(void* t_bpfctx, void* t_data, int t_datasize)
 {
     eBPFevent       event;
@@ -238,7 +248,7 @@ static void ebpfHandler(void* t_bpfctx, void* t_data, int t_datasize)
     memcpy(&event, t_data, sizeof(eBPFevent));
     ebpf_preprocess_event(&event);
 
-    for(auto &f : s_filters) {
+    for(auto &f : *s_filters) {
         if(!f(&event)) {
             isMatch = false;
             break;
@@ -247,51 +257,27 @@ static void ebpfHandler(void* t_bpfctx, void* t_data, int t_datasize)
     if(isMatch) {
         struct timespec tp;
         clock_gettime(CLOCK_MONOTONIC, &tp);
-        IPV4Handler(t_bpfctx, &event, &event.addr.v4);
+        std::cout << "[" << event2String(&event) << "] "
+                  << event.ifname << " "
+                  << (int)event.proto << " "
+                  << event.proc.task << " "
+                  << "["
+                  << ip2str(event.addr.v4.saddr)
+                  << ":"
+                  << event.sport
+                  << " <-> "
+                  << ip2str(event.addr.v4.daddr)
+                  << ":"
+                  << event.dport
+                  << "] "
+                  << (unsigned int)event.event_time.tv_sec
+                  << "."
+                  << (unsigned int)event.event_time.tv_usec
+                  << " "
+                  << double(event.latency_usec / (double)1000.0)
+                  << " "
+                  << ((float)(tp.tv_nsec-(event.ktime % 1000000000)) / (float)1000)
+                  << std::endl;
     }
-/*    std::cout << "[latency "
-              << ((float)(tp.tv_nsec-(event.ktime % 1000000000)) / (float)1000)
-              << " usec] ";
-
-    std::cout << (unsigned int)event.event_time.tv_sec
-              << "."
-              << (unsigned int)event.event_time.tv_usec
-              << " ";*/
-
-/*
-  printf("[%s][%s][IPv4/%s][pid/tid: %u/%u [%s], uid/gid: %u/%u][father pid/tid: %u/%u [%s], uid/gid: %u/%u]",
-	 event.ifname, event.sent_packet ? "Sent" : "Rcvd",
-	 (event.proto == IPPROTO_TCP) ? "TCP" : "UDP",
-	 event.proc.pid, event.proc.tid,
-	 (event.proc.full_task_path == NULL) ? event.proc.task : event.proc.full_task_path,
-	 event.proc.uid, event.proc.gid,
-	 event.father.pid, event.father.tid,
-	 (event.father.full_task_path == NULL) ? event.father.task : event.father.full_task_path,
-     event.father.uid, event.father.gid);
-
-    if(event.ip_version == 4) {
-        IPV4Handler(t_bpfctx, &event, &event.addr.v4);
-    } else {
-        std::cerr << "must be IPV6Handler" << std::endl;
-    }
-    if(event.proto == IPPROTO_TCP) {
-        std::cout << "[" << event2String(&event) << "] ";
-    }
-
-    if(event.etype == eTCP_CONN) {
-        std::cout << "[latency: " << (((float)event.latency_usec)/(float)1000) << " msec]";
-    }
-
-    if(event.container_id[0] != '\0') {
-    printf("[containerID: %s]", event.container_id);
-    
-    if(event.docker.name != NULL)
-      printf("[docker_name: %s]", event.docker.name);
-
-    if(event.kube.ns)  printf("[kube_name: %s]", event.kube.name);
-    if(event.kube.pod) printf("[kube_pod: %s]",  event.kube.pod);
-    if(event.kube.ns)  printf("[kube_ns: %s]",   event.kube.ns);
-  }
-*/
     ebpf_free_event(&event);
 }
