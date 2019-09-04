@@ -26,4 +26,4 @@ set(SOURCE_FILES main.cpp)
 
 add_executable(flowstat ${SOURCE_FILES})
 
-target_link_libraries(flowstat bcc ${LIB_EBPFFLOW} curl json-c)
+target_link_libraries(flowstat bcc ${LIB_EBPFFLOW} curl json-c boost_program_options)
