@@ -69,36 +69,36 @@ static void init(int argc, const char *argv[])
         exit(0);
     }
     if(vm.count("version")) {
-        std::cout << "0.0.2-" << __DATE__ << std::endl;
+        std::cout << "0.0.3-" << __DATE__ << std::endl;
         exit(0);
     }
     if(vm.count("interface")) {
         g_interface = vm["interface"].as<std::string>();
-        g_filters->push_back(InterfaceFilter());
+        g_filters->emplace_back(InterfaceFilter());
     }
     if(vm.count("srcaddr")) {
         auto statistic = std::make_shared<Statistic>();
         g_statistics->push_back(statistic);        
         g_srcaddr = str2ip(vm["srcaddr"].as<std::string>());
-        g_filters->push_back(SrcAddrFilter(statistic));
+        g_filters->emplace_back(SrcAddrFilter(statistic));
     }
     if(vm.count("dstaddr")) {
         auto statistic = std::make_shared<Statistic>();
         g_statistics->push_back(statistic);
         g_dstaddr = str2ip(vm["dstaddr"].as<std::string>());
-        g_filters->push_back(DstAddrFilter(statistic));
+        g_filters->emplace_back(DstAddrFilter(statistic));
     }
     if(vm.count("srcport")) {
         auto statistic = std::make_shared<Statistic>();
         g_statistics->push_back(statistic);
         g_srcport = vm["srcport"].as<uint16_t>();
-        g_filters->push_back(SrcPortFilter(statistic));
+        g_filters->emplace_back(SrcPortFilter(statistic));
     }
     if(vm.count("dstport")) {
         auto statistic = std::make_shared<Statistic>();
         g_statistics->push_back(statistic);
         g_dstport = vm["dstport"].as<uint16_t>();
-        g_filters->push_back(DstPortFilter(statistic));
+        g_filters->emplace_back(DstPortFilter(statistic));
     }
     if(vm.count("proto")) {
         auto statistic = std::make_shared<Statistic>();
@@ -106,15 +106,15 @@ static void init(int argc, const char *argv[])
         const std::string proto = vm["proto"].as<std::string>();
         if(proto == "tcp") {
             s_flags |= LIBEBPF_TCP | LIBEBPF_TCP_CLOSE | LIBEBPF_TCP_RETR;
-            g_filters->push_back(TcpProtoFilter(statistic));
+            g_filters->emplace_back(TcpProtoFilter(statistic));
         } else if(proto == "udp") {
            s_flags |= LIBEBPF_UDP;
-           g_filters->push_back(UdpProtoFilter(statistic));
+           g_filters->emplace_back(UdpProtoFilter(statistic));
         } else if(proto == "any") {
            s_flags |= LIBEBPF_UDP | LIBEBPF_TCP | LIBEBPF_TCP_CLOSE | LIBEBPF_TCP_RETR;
-           g_filters->push_back(AnyProtoFilter(statistic));
+           g_filters->emplace_back(AnyProtoFilter(statistic));
         } else {
-            throw std::runtime_error("Invalid argument 'proto'");
+            throw std::runtime_error(SOURCE_FILE_LINE + "Invalid argument 'proto'");
         }
     }
     if(vm.count("flush")) {
@@ -122,13 +122,13 @@ static void init(int argc, const char *argv[])
        //....
     }
     if(getuid() != 0) {
-        throw std::runtime_error("Please run as root user");
+        throw std::runtime_error(SOURCE_FILE_LINE + "Please run as root user");
     }
     s_flags |= LIBEBPF_INCOMING;
     g_ebpf = init_ebpf_flow(NULL, ebpfHandler, &rc, s_flags);
     if(!g_ebpf) {
         throw std::runtime_error(
-                std::string("Unable to initialize libebpfflow: ") + ebpf_print_error(rc)
+                SOURCE_FILE_LINE + "Unable to initialize libebpfflow: " + ebpf_print_error(rc)
             );
     }
     signal(SIGINT,  terminate);
@@ -159,7 +159,7 @@ int main(int argc, const char *argv[])
         done();
     } catch(const std::exception& err) {
         done();
-        std::cerr << "Error: " << SOURCE_FILE_LINE << err.what() << std::endl;
+        std::cerr << "Error: " << err.what() << std::endl;
     }
     return 0;
 }

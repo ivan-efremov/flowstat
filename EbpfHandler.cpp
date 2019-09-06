@@ -8,6 +8,7 @@
 
 
 extern PVectorFilters g_filters;
+extern void          *g_ebpf;
 
 
 static std::string event2String(eBPFevent* e)
@@ -42,10 +43,18 @@ void ebpfHandler(void* t_bpfctx, void* t_data, int t_datasize)
 {
     eBPFevent       event;
     bool            isMatch = true;
-    //struct sock *sk = (struct sock *) PT_REGS_RC(t_bpfctx);
 
     memcpy(&event, t_data, sizeof(eBPFevent));
     ebpf_preprocess_event(&event);
+
+    std::cout << "Stat: ";
+    // BPF_HASH(currsock, u32, struct sock_stats);
+    ebpf::BPF *bpf =  reinterpret_cast<ebpf::BPF*>(g_ebpf);
+    auto htable = bpf->get_hash_table<u32, struct sock_stats>("currsock");
+    for(auto i : htable.get_table_offline()) {
+        std::cout << i.first << i.second.ts << "\n";
+    }
+    std::cout << std::endl;
 
     for(auto &f : *g_filters) {
         if(!f(&event)) {
@@ -53,6 +62,7 @@ void ebpfHandler(void* t_bpfctx, void* t_data, int t_datasize)
             break;
         }
     }
+
     if(isMatch) {
         struct timespec tp;
         clock_gettime(CLOCK_MONOTONIC, &tp);
@@ -73,7 +83,7 @@ void ebpfHandler(void* t_bpfctx, void* t_data, int t_datasize)
                   << "."
                   << (unsigned int)event.event_time.tv_usec
                   << " "
-                  << double(event.latency_usec / (double)1000.0)
+                  << (event.latency_usec / 1000.0f)
                   << " "
                   << ((float)(tp.tv_nsec-(event.ktime % 1000000000)) / (float)1000)
                   << std::endl;
